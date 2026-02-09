@@ -26,7 +26,7 @@ jobs:
           echo "RSS fetched, first 5 lines:"
           head -n 5 feed.xml
 
-      - name: Parse and Send to Feishu
+            - name: Parse and Send to Feishu
         run: |
           node <<'EOF'
           const fs = require('fs');
@@ -35,11 +35,34 @@ jobs:
 
           const xml = fs.readFileSync('feed.xml', 'utf8');
 
-          // RSS: <item> ... </item>
-          const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)];
+          function decode(s='') {
+            return s
+              .replace(/&amp;/g, '&')
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'");
+          }
 
-          if (!items.length) {
-            console.log("No <item> found. This feed might be Atom. (Still OK, but this script only handles RSS for now.)");
+          function pick(block, reList) {
+            for (const re of reList) {
+              const m = block.match(re);
+              if (m && m[1]) return decode(m[1].trim());
+            }
+            return '';
+          }
+
+          // ---- Parse RSS (<item>) or Atom (<entry>) ----
+          let entries = [...xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/g)].map(m => m[1]);
+          let mode = 'rss';
+
+          if (!entries.length) {
+            entries = [...xml.matchAll(/<entry\b[^>]*>([\s\S]*?)<\/entry>/g)].map(m => m[1]);
+            mode = 'atom';
+          }
+
+          if (!entries.length) {
+            console.log('No <item> or <entry> found. Nothing to send.');
             process.exit(0);
           }
 
@@ -76,18 +99,46 @@ jobs:
           (async () => {
             let sentCount = 0;
 
-            for (const m of items.slice(0, 3)) {
-              const block = m[1];
-              const title =
-                (block.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/) || block.match(/<title>(.*?)<\/title>/))?.[1];
-              const link = (block.match(/<link>(.*?)<\/link>/))?.[1];
+            for (const block of entries.slice(0, 5)) {
+              let title = '';
+              let link = '';
+              let time = '';
+
+              if (mode === 'rss') {
+                title = pick(block, [
+                  /<title><!\[CDATA\[(.*?)\]\]><\/title>/,
+                  /<title>([\s\S]*?)<\/title>/
+                ]);
+                link = pick(block, [
+                  /<link>([\s\S]*?)<\/link>/
+                ]);
+                time = pick(block, [
+                  /<pubDate>([\s\S]*?)<\/pubDate>/,
+                  /<dc:date>([\s\S]*?)<\/dc:date>/
+                ]);
+              } else {
+                // Atom
+                title = pick(block, [
+                  /<title[^>]*><!\[CDATA\[(.*?)\]\]><\/title>/,
+                  /<title[^>]*>([\s\S]*?)<\/title>/
+                ]);
+
+                // Atom link can be: <link href="..."/> or <link rel="alternate" href="..."/>
+                const mHref = block.match(/<link\b[^>]*href="([^"]+)"[^>]*\/?>/);
+                link = mHref ? decode(mHref[1].trim()) : '';
+
+                time = pick(block, [
+                  /<updated>([\s\S]*?)<\/updated>/,
+                  /<published>([\s\S]*?)<\/published>/
+                ]);
+              }
 
               if (!title || !link) continue;
 
               const id = crypto.createHash('md5').update(title + link).digest('hex');
               if (sent.has(id)) continue;
 
-              const msg = `🆕 RSS 更新\n${title}\n${link}`;
+              const msg = `🆕 RSS 更新\n${title}\n${link}${time ? `\n${time}` : ''}`;
               const r = await postToFeishu(msg);
               console.log("Feishu response:", r.status, r.body);
 
@@ -96,12 +147,13 @@ jobs:
             }
 
             fs.writeFileSync(sentFile, [...sent].join('\n'));
-            console.log("New items sent:", sentCount);
+            console.log("Mode:", mode, "| New items sent:", sentCount);
           })().catch(err => {
             console.error(err);
             process.exit(1);
           });
           EOF
+
 
       - name: Save state
         run: |
