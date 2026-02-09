@@ -1,0 +1,151 @@
+name: Figma Release Notes -> Feishu
+
+on:
+  workflow_dispatch:
+    inputs:
+      send_first_now:
+        description: "Manual run: always send the latest (first) release note"
+        required: false
+        default: "true"
+  schedule:
+    - cron: "*/30 * * * *" # every 30 minutes
+
+permissions:
+  contents: write
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    env:
+      FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+      RSS_URL: ${{ secrets.RSS_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install feedparser requests
+
+      - name: Fetch latest Figma release note and send to Feishu
+        env:
+          SEND_FIRST_NOW: ${{ github.event.inputs.send_first_now }}
+        run: |
+          python <<'PY'
+          import os, json, hashlib, datetime
+          import requests
+          import feedparser
+
+          FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "").strip()
+          if not FEISHU_WEBHOOK:
+            raise SystemExit("Missing FEISHU_WEBHOOK secret.")
+
+          RSS_URL = (os.environ.get("RSS_URL") or "https://www.figma.com/release-notes/feed/atom.xml").strip()
+
+          # Manual run default: always send the latest one
+          send_first_now = (os.environ.get("SEND_FIRST_NOW") or "true").lower() == "true"
+
+          state_file = "sent_state.json"
+          sent = set()
+          if os.path.exists(state_file):
+            try:
+              with open(state_file, "r", encoding="utf-8") as f:
+                sent = set(json.load(f).get("sent_ids", []))
+            except Exception:
+              sent = set()
+
+          headers = {
+            "User-Agent": "Mozilla/5.0 (GitHub Actions RSS Bot)",
+            "Accept": "application/atom+xml,application/xml;q=0.9,*/*;q=0.8",
+          }
+
+          # Fetch feed (requests auto-decompresses gzip)
+          r = requests.get(RSS_URL, headers=headers, timeout=30)
+          r.raise_for_status()
+
+          feed = feedparser.parse(r.text)
+          if not feed.entries:
+            raise SystemExit("No entries found in feed. (Unexpected for Figma feed)")
+
+          entry = feed.entries[0]  # latest / first
+          title = (entry.get("title") or "").strip()
+          link = (entry.get("link") or "").strip()
+          published = (entry.get("published") or entry.get("updated") or "").strip()
+          entry_id = (entry.get("id") or "").strip()
+
+          if not title or not link:
+            raise SystemExit("Failed to parse title/link from the first entry.")
+
+          stable_id_src = entry_id or (title + "|" + link)
+          stable_id = hashlib.md5(stable_id_src.encode("utf-8")).hexdigest()
+
+          # Dedupe: scheduled runs only send new items; manual run can force-send latest
+          should_send = send_first_now or (stable_id not in sent)
+
+          print("RSS_URL:", RSS_URL)
+          print("send_first_now:", send_first_now)
+          print("first_title:", title)
+          print("first_link:", link)
+          print("first_published:", published)
+          print("stable_id:", stable_id)
+          print("already_sent:", stable_id in sent)
+          print("should_send:", should_send)
+
+          if not should_send:
+            print("Nothing to send (already sent).")
+            raise SystemExit(0)
+
+          # Compose message
+          lines = [
+            "🧩 Figma Release Notes (Latest)",
+            title,
+            link
+          ]
+          if published:
+            lines.append(f"Published: {published}")
+          text = "\n".join(lines)
+
+          payload = {
+            "msg_type": "text",
+            "content": {"text": text}
+          }
+
+          resp = requests.post(FEISHU_WEBHOOK, json=payload, timeout=15)
+          print("Feishu HTTP status:", resp.status_code)
+          print("Feishu body:", resp.text)
+
+          # Feishu bot usually returns JSON with StatusCode/StatusMessage
+          if resp.status_code != 200:
+            raise SystemExit(f"Feishu webhook HTTP {resp.status_code}")
+
+          try:
+            data = resp.json()
+            # common success shape: {"StatusCode":0,"StatusMessage":"success"}
+            if isinstance(data, dict) and ("StatusCode" in data) and data.get("StatusCode") != 0:
+              raise SystemExit(f"Feishu rejected: {data}")
+          except ValueError:
+            # If not JSON, still treat 200 as success
+            pass
+
+          # Save state
+          sent.add(stable_id)
+          with open(state_file, "w", encoding="utf-8") as f:
+            json.dump({"sent_ids": sorted(sent), "updated_at": datetime.datetime.utcnow().isoformat() + "Z"}, f, ensure_ascii=False, indent=2)
+
+          print("Sent OK, state updated.")
+          PY
+
+      - name: Commit state
+        run: |
+          git config user.name "rss-bot"
+          git config user.email "rss-bot@github.com"
+          git add sent_state.json || true
+          git commit -m "Update sent state" || true
+          git push || true
