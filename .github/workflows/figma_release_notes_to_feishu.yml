@@ -1,4 +1,4 @@
-name: Figma Release Notes -> Feishu
+name: Figma Release Notes -> Feishu (Stable)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: false
         default: "true"
   schedule:
-    - cron: "*/30 * * * *" # every 30 minutes
+    - cron: "*/30 * * * *"
 
 permissions:
   contents: write
@@ -39,7 +39,7 @@ jobs:
           SEND_FIRST_NOW: ${{ github.event.inputs.send_first_now }}
         run: |
           python <<'PY'
-          import os, json, hashlib, datetime
+          import os, json, hashlib, datetime, re
           import requests
           import feedparser
 
@@ -48,8 +48,6 @@ jobs:
             raise SystemExit("Missing FEISHU_WEBHOOK secret.")
 
           RSS_URL = (os.environ.get("RSS_URL") or "https://www.figma.com/release-notes/feed/atom.xml").strip()
-
-          # Manual run default: always send the latest one
           send_first_now = (os.environ.get("SEND_FIRST_NOW") or "true").lower() == "true"
 
           state_file = "sent_state.json"
@@ -62,79 +60,95 @@ jobs:
               sent = set()
 
           headers = {
-            "User-Agent": "Mozilla/5.0 (GitHub Actions RSS Bot)",
-            "Accept": "application/atom+xml,application/xml;q=0.9,*/*;q=0.8",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+            "Accept": "application/atom+xml,application/xml;q=0.9,text/xml;q=0.8,*/*;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
           }
 
-          # Fetch feed (requests auto-decompresses gzip)
-          r = requests.get(RSS_URL, headers=headers, timeout=30)
+          print("RSS_URL:", RSS_URL)
+          r = requests.get(RSS_URL, headers=headers, timeout=30, allow_redirects=True)
+          print("HTTP status:", r.status_code)
+          print("Final URL:", r.url)
           r.raise_for_status()
 
-          feed = feedparser.parse(r.text)
-          if not feed.entries:
-            raise SystemExit("No entries found in feed. (Unexpected for Figma feed)")
+          content = r.content  # bytes (more reliable than r.text)
+          # Print a short preview for debugging
+          preview = content[:2000].decode("utf-8", errors="replace")
+          print("---- Content preview (first ~2000 chars) ----")
+          print(preview)
+          print("---- End preview ----")
 
-          entry = feed.entries[0]  # latest / first
+          # If we got HTML instead of XML, stop with a clear message
+          if re.search(r"<html|<!doctype html", preview, re.IGNORECASE):
+            raise SystemExit(
+              "Fetched HTML instead of Atom XML. This usually means the site returned a bot-check/login page from GitHub Actions."
+            )
+
+          feed = feedparser.parse(content)
+          print("feedparser.bozo:", getattr(feed, "bozo", None))
+          if getattr(feed, "bozo", 0):
+            print("bozo_exception:", getattr(feed, "bozo_exception", None))
+
+          if not feed.entries:
+            raise SystemExit("No entries found in feed after parsing bytes.")
+
+          entry = feed.entries[0]
           title = (entry.get("title") or "").strip()
           link = (entry.get("link") or "").strip()
           published = (entry.get("published") or entry.get("updated") or "").strip()
           entry_id = (entry.get("id") or "").strip()
 
+          print("first_title:", title)
+          print("first_link:", link)
+          print("first_published:", published)
+
           if not title or not link:
-            raise SystemExit("Failed to parse title/link from the first entry.")
+            raise SystemExit("Parsed entry missing title or link. Feed structure might be different than expected.")
 
           stable_id_src = entry_id or (title + "|" + link)
           stable_id = hashlib.md5(stable_id_src.encode("utf-8")).hexdigest()
 
-          # Dedupe: scheduled runs only send new items; manual run can force-send latest
-          should_send = send_first_now or (stable_id not in sent)
+          already_sent = stable_id in sent
+          should_send = send_first_now or (not already_sent)
 
-          print("RSS_URL:", RSS_URL)
-          print("send_first_now:", send_first_now)
-          print("first_title:", title)
-          print("first_link:", link)
-          print("first_published:", published)
           print("stable_id:", stable_id)
-          print("already_sent:", stable_id in sent)
+          print("already_sent:", already_sent)
+          print("send_first_now:", send_first_now)
           print("should_send:", should_send)
 
           if not should_send:
             print("Nothing to send (already sent).")
             raise SystemExit(0)
 
-          # Compose message
-          lines = [
+          text_lines = [
             "🧩 Figma Release Notes (Latest)",
             title,
-            link
+            link,
           ]
           if published:
-            lines.append(f"Published: {published}")
-          text = "\n".join(lines)
+            text_lines.append(f"Published: {published}")
 
           payload = {
             "msg_type": "text",
-            "content": {"text": text}
+            "content": {"text": "\n".join(text_lines)}
           }
 
           resp = requests.post(FEISHU_WEBHOOK, json=payload, timeout=15)
           print("Feishu HTTP status:", resp.status_code)
           print("Feishu body:", resp.text)
 
-          # Feishu bot usually returns JSON with StatusCode/StatusMessage
           if resp.status_code != 200:
             raise SystemExit(f"Feishu webhook HTTP {resp.status_code}")
 
           try:
             data = resp.json()
-            # common success shape: {"StatusCode":0,"StatusMessage":"success"}
             if isinstance(data, dict) and ("StatusCode" in data) and data.get("StatusCode") != 0:
               raise SystemExit(f"Feishu rejected: {data}")
           except ValueError:
-            # If not JSON, still treat 200 as success
             pass
 
-          # Save state
           sent.add(stable_id)
           with open(state_file, "w", encoding="utf-8") as f:
             json.dump({"sent_ids": sorted(sent), "updated_at": datetime.datetime.utcnow().isoformat() + "Z"}, f, ensure_ascii=False, indent=2)
