@@ -1,8 +1,8 @@
-name: RSS to Feishu
+name: RSS/Atom to Feishu (Figma Release Notes)
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/10 * * * *"  # every 10 minutes
   workflow_dispatch:
 
 permissions:
@@ -19,13 +19,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch feed (RSS/Atom)
+      - name: Fetch feed (supports gzip) + debug preview
         run: |
-          echo "RSS_URL is set? -> ${RSS_URL:+YES}"
-          echo "FEISHU_WEBHOOK is set? -> ${FEISHU_WEBHOOK:+YES}"
-          curl -LfsS "$RSS_URL" -o feed.xml
-          echo "Feed fetched. First 10 lines:"
-          head -n 10 feed.xml
+          echo "RSS_URL set? -> ${RSS_URL:+YES}"
+          echo "FEISHU_WEBHOOK set? -> ${FEISHU_WEBHOOK:+YES}"
+          echo "Fetching feed..."
+          curl -LfsS --compressed \
+            -H "Accept: application/atom+xml,application/xml;q=0.9,*/*;q=0.8" \
+            -A "Mozilla/5.0" \
+            "$RSS_URL" -o feed.xml
+          echo "---- first 30 lines ----"
+          sed -n '1,30p' feed.xml
 
       - name: Parse feed and send to Feishu
         run: |
@@ -97,6 +101,21 @@ jobs:
             });
           }
 
+          function extractAtomLink(block) {
+            // Prefer rel="alternate" if present; otherwise first href
+            const alt = block.match(/<link\b[^>]*rel="alternate"[^>]*href="([^"]+)"[^>]*\/?>/);
+            if (alt && alt[1]) return decode(alt[1]);
+
+            const any = block.match(/<link\b[^>]*href="([^"]+)"[^>]*\/?>/);
+            if (any && any[1]) return decode(any[1]);
+
+            // Fallback: <link>text</link> (rare for Atom)
+            const text = block.match(/<link[^>]*>([\s\S]*?)<\/link>/);
+            if (text && text[1]) return decode(text[1].trim());
+
+            return '';
+          }
+
           (async () => {
             let sentCount = 0;
 
@@ -118,14 +137,12 @@ jobs:
                   /<dc:date>([\s\S]*?)<\/dc:date>/
                 ]);
               } else {
+                // Atom
                 title = pick(block, [
                   /<title[^>]*><!\[CDATA\[(.*?)\]\]><\/title>/,
                   /<title[^>]*>([\s\S]*?)<\/title>/
                 ]);
-
-                const mHref = block.match(/<link\b[^>]*href="([^"]+)"[^>]*\/?>/);
-                link = mHref ? decode(mHref[1]) : '';
-
+                link = extractAtomLink(block);
                 time = pick(block, [
                   /<updated>([\s\S]*?)<\/updated>/,
                   /<published>([\s\S]*?)<\/published>/
