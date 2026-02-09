@@ -130,32 +130,42 @@ jobs:
           if not summary:
             summary = "_No summary available._"
 
-          # Build Feishu interactive card
+          # --- Clean Feishu interactive card (no date) ---
           card = {
-            "config": {"wide_screen_mode": True},
+            "config": {
+              "wide_screen_mode": True
+            },
             "header": {
-              "title": {"tag": "plain_text", "content": "🚀 Figma Release Notes"},
+              "title": {
+                "tag": "plain_text",
+                "content": "🚀 Figma Release Notes"
+              },
               "template": "blue"
             },
             "elements": [
               {
                 "tag": "div",
-                "text": {"tag": "lark_md", "content": f"**{title}**"}
+                "text": {
+                  "tag": "lark_md",
+                  "content": f"**{title}**"
+                }
               },
               {
                 "tag": "div",
-                "text": {"tag": "lark_md", "content": summary}
-              },
-              {
-                "tag": "div",
-                "text": {"tag": "lark_md", "content": f"🗓️ Published: `{published}`" if published else ""}
+                "text": {
+                  "tag": "lark_md",
+                  "content": summary
+                }
               },
               {
                 "tag": "action",
                 "actions": [
                   {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "Open release note"},
+                    "text": {
+                      "tag": "plain_text",
+                      "content": "Learn more"
+                    },
                     "type": "primary",
                     "url": link
                   }
@@ -163,10 +173,14 @@ jobs:
               }
             ]
           }
-
-          payload = {"msg_type": "interactive", "card": card}
-
+          
+          payload = {
+            "msg_type": "interactive",
+            "card": card
+          }
+          
           resp = requests.post(FEISHU_WEBHOOK, json=payload, timeout=15)
+
           print("Feishu HTTP status:", resp.status_code)
           print("Feishu body:", resp.text)
 
