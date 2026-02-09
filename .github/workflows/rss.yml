@@ -1,8 +1,8 @@
-name: RSS/Atom to Feishu (Figma Release Notes)
+name: Figma Atom to Feishu (Debug)
 
 on:
   schedule:
-    - cron: "*/10 * * * *"  # every 10 minutes
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -19,19 +19,52 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch feed (supports gzip) + debug preview
+      - name: Fetch feed (supports gzip) + preview
         run: |
           echo "RSS_URL set? -> ${RSS_URL:+YES}"
           echo "FEISHU_WEBHOOK set? -> ${FEISHU_WEBHOOK:+YES}"
-          echo "Fetching feed..."
+
           curl -LfsS --compressed \
             -H "Accept: application/atom+xml,application/xml;q=0.9,*/*;q=0.8" \
             -A "Mozilla/5.0" \
             "$RSS_URL" -o feed.xml
-          echo "---- first 30 lines ----"
-          sed -n '1,30p' feed.xml
 
-      - name: Parse feed and send to Feishu
+          echo "---- first 20 lines ----"
+          sed -n '1,20p' feed.xml
+
+      - name: Send a test message to Feishu (must appear)
+        run: |
+          node <<'EOF'
+          const https = require('https');
+
+          function postToFeishu(text) {
+            return new Promise((resolve, reject) => {
+              const payload = JSON.stringify({ msg_type: "text", content: { text } });
+              const req = https.request(process.env.FEISHU_WEBHOOK, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Content-Length': Buffer.byteLength(payload)
+                }
+              }, res => {
+                let data = '';
+                res.on('data', c => data += c);
+                res.on('end', () => resolve({ status: res.statusCode, body: data }));
+              });
+              req.on('error', reject);
+              req.write(payload);
+              req.end();
+            });
+          }
+
+          (async () => {
+            const msg = `RSS Bot 测试消息 ✅\n如果你看到了这条，说明 webhook 没问题。\n时间：${new Date().toISOString()}`;
+            const r = await postToFeishu(msg);
+            console.log('Feishu response:', r.status, r.body);
+          })().catch(e => { console.error(e); process.exit(1); });
+          EOF
+
+      - name: Parse feed and send updates
         run: |
           node <<'EOF'
           const fs = require('fs');
@@ -57,32 +90,22 @@ jobs:
             return '';
           }
 
-          // RSS <item> or Atom <entry>
-          let entries = [...xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/g)].map(m => m[1]);
-          let mode = 'rss';
+          function extractAtomLink(block) {
+            const alt = block.match(/<link\b[^>]*rel="alternate"[^>]*href="([^"]+)"[^>]*\/?>/);
+            if (alt && alt[1]) return decode(alt[1]);
 
-          if (!entries.length) {
-            entries = [...xml.matchAll(/<entry\b[^>]*>([\s\S]*?)<\/entry>/g)].map(m => m[1]);
-            mode = 'atom';
+            const any = block.match(/<link\b[^>]*href="([^"]+)"[^>]*\/?>/);
+            if (any && any[1]) return decode(any[1]);
+
+            const text = block.match(/<link[^>]*>([\s\S]*?)<\/link>/);
+            if (text && text[1]) return decode(text[1].trim());
+
+            return '';
           }
-
-          if (!entries.length) {
-            console.log('No <item> or <entry> found, nothing to send.');
-            process.exit(0);
-          }
-
-          const sentFile = 'sent.txt';
-          const sent = fs.existsSync(sentFile)
-            ? new Set(fs.readFileSync(sentFile, 'utf8').split('\n').filter(Boolean))
-            : new Set();
 
           function postToFeishu(text) {
             return new Promise((resolve, reject) => {
-              const payload = JSON.stringify({
-                msg_type: "text",
-                content: { text }
-              });
-
+              const payload = JSON.stringify({ msg_type: "text", content: { text } });
               const req = https.request(process.env.FEISHU_WEBHOOK, {
                 method: 'POST',
                 headers: {
@@ -94,85 +117,84 @@ jobs:
                 res.on('data', c => data += c);
                 res.on('end', () => resolve({ status: res.statusCode, body: data }));
               });
-
               req.on('error', reject);
               req.write(payload);
               req.end();
             });
           }
 
-          function extractAtomLink(block) {
-            // Prefer rel="alternate" if present; otherwise first href
-            const alt = block.match(/<link\b[^>]*rel="alternate"[^>]*href="([^"]+)"[^>]*\/?>/);
-            if (alt && alt[1]) return decode(alt[1]);
+          // RSS <item> or Atom <entry>
+          let entries = [...xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/g)].map(m => m[1]);
+          let mode = 'rss';
 
-            const any = block.match(/<link\b[^>]*href="([^"]+)"[^>]*\/?>/);
-            if (any && any[1]) return decode(any[1]);
-
-            // Fallback: <link>text</link> (rare for Atom)
-            const text = block.match(/<link[^>]*>([\s\S]*?)<\/link>/);
-            if (text && text[1]) return decode(text[1].trim());
-
-            return '';
+          if (!entries.length) {
+            entries = [...xml.matchAll(/<entry\b[^>]*>([\s\S]*?)<\/entry>/g)].map(m => m[1]);
+            mode = 'atom';
           }
 
-          (async () => {
-            let sentCount = 0;
+          console.log('Mode:', mode, 'Entries found:', entries.length);
 
-            for (const block of entries.slice(0, 5)) {
-              let title = '';
-              let link = '';
-              let time = '';
+          if (!entries.length) {
+            console.log('No <item> or <entry> found, nothing to send.');
+            process.exit(0);
+          }
 
-              if (mode === 'rss') {
-                title = pick(block, [
-                  /<title><!\[CDATA\[(.*?)\]\]><\/title>/,
-                  /<title>([\s\S]*?)<\/title>/
-                ]);
-                link = pick(block, [
-                  /<link>([\s\S]*?)<\/link>/
-                ]);
-                time = pick(block, [
-                  /<pubDate>([\s\S]*?)<\/pubDate>/,
-                  /<dc:date>([\s\S]*?)<\/dc:date>/
-                ]);
-              } else {
-                // Atom
-                title = pick(block, [
-                  /<title[^>]*><!\[CDATA\[(.*?)\]\]><\/title>/,
-                  /<title[^>]*>([\s\S]*?)<\/title>/
-                ]);
-                link = extractAtomLink(block);
-                time = pick(block, [
-                  /<updated>([\s\S]*?)<\/updated>/,
-                  /<published>([\s\S]*?)<\/published>/
-                ]);
-              }
+          const sentFile = 'sent.txt';
+          const sent = fs.existsSync(sentFile)
+            ? new Set(fs.readFileSync(sentFile, 'utf8').split('\n').filter(Boolean))
+            : new Set();
 
-              if (!title || !link) continue;
+          let sentCount = 0;
 
-              const id = crypto.createHash('md5').update(title + link).digest('hex');
-              if (sent.has(id)) continue;
+          for (const [i, block] of entries.slice(0, 10).entries()) {
+            let title = '';
+            let link = '';
+            let time = '';
 
-              const msg =
-                `RSS 🆕 更新\n` +
-                `${title}\n` +
-                `${link}` +
-                (time ? `\n${time}` : '');
-
-              const r = await postToFeishu(msg);
-              console.log('Feishu response:', r.status, r.body);
-
-              sent.add(id);
-              sentCount++;
+            if (mode === 'rss') {
+              title = pick(block, [
+                /<title><!\[CDATA\[(.*?)\]\]><\/title>/,
+                /<title>([\s\S]*?)<\/title>/
+              ]);
+              link = pick(block, [
+                /<link>([\s\S]*?)<\/link>/
+              ]);
+              time = pick(block, [
+                /<pubDate>([\s\S]*?)<\/pubDate>/,
+                /<dc:date>([\s\S]*?)<\/dc:date>/
+              ]);
+            } else {
+              title = pick(block, [
+                /<title[^>]*><!\[CDATA\[(.*?)\]\]><\/title>/,
+                /<title[^>]*>([\s\S]*?)<\/title>/
+              ]);
+              link = extractAtomLink(block);
+              time = pick(block, [
+                /<updated>([\s\S]*?)<\/updated>/,
+                /<published>([\s\S]*?)<\/published>/
+              ]);
             }
 
-            fs.writeFileSync(sentFile, [...sent].join('\n'));
-            console.log('Mode:', mode, '| New items sent:', sentCount);
-          })().catch(err => {
-            console.error(err);
-            process.exit(1);
-          });
+            console.log(`Item#${i+1} parsed -> title? ${!!title} | link? ${!!link}`);
+
+            if (!title || !link) continue;
+
+            const id = crypto.createHash('md5').update(title + link).digest('hex');
+            if (sent.has(id)) continue;
+
+            const msg =
+              `RSS 🆕 更新\n${title}\n${link}` +
+              (time ? `\n${time}` : '');
+
+            const r = await postToFeishu(msg);
+            console.log('Feishu response:', r.status, r.body);
+
+            sent.add(id);
+            sentCount++;
+          }
+
+          fs.writeFileSync(sentFile, [...sent].join('\n'));
+          console.log('New items sent:', sentCount);
           EOF
 
       - name: Save sent state
