@@ -32,9 +32,9 @@ jobs:
           echo "---- first 20 lines ----"
           sed -n '1,20p' feed.xml
 
-      - name: Send a test message to Feishu (must appear)
+            - name: Send a test message to Feishu (must appear)
         run: |
-          node --input-type=commonjs <<'EOF'
+          cat > feishu_test.cjs <<'EOF'
           const https = require('https');
 
           function postToFeishu(text) {
@@ -58,15 +58,18 @@ jobs:
           }
 
           (async () => {
-            const msg = `RSS Bot 测试消息 ✅\n如果你看到了这条，说明 webhook 没问题。\n时间：${new Date().toISOString()}`;
+            const msg = `RSS Bot 测试消息 ✅\n时间：${new Date().toISOString()}`;
             const r = await postToFeishu(msg);
             console.log('Feishu response:', r.status, r.body);
           })().catch(e => { console.error(e); process.exit(1); });
           EOF
 
-      - name: Parse feed and send updates
+          node feishu_test.cjs
+
+
+            - name: Parse feed and send updates
         run: |
-          node --input-type=commonjs <<'EOF'
+          cat > rss_to_feishu.cjs <<'EOF'
           const fs = require('fs');
           const crypto = require('crypto');
           const https = require('https');
@@ -144,58 +147,61 @@ jobs:
             ? new Set(fs.readFileSync(sentFile, 'utf8').split('\n').filter(Boolean))
             : new Set();
 
-          let sentCount = 0;
+          (async () => {
+            let sentCount = 0;
 
-          for (const [i, block] of entries.slice(0, 10).entries()) {
-            let title = '';
-            let link = '';
-            let time = '';
+            for (const block of entries.slice(0, 5)) {
+              let title = '';
+              let link = '';
+              let time = '';
 
-            if (mode === 'rss') {
-              title = pick(block, [
-                /<title><!\[CDATA\[(.*?)\]\]><\/title>/,
-                /<title>([\s\S]*?)<\/title>/
-              ]);
-              link = pick(block, [
-                /<link>([\s\S]*?)<\/link>/
-              ]);
-              time = pick(block, [
-                /<pubDate>([\s\S]*?)<\/pubDate>/,
-                /<dc:date>([\s\S]*?)<\/dc:date>/
-              ]);
-            } else {
-              title = pick(block, [
-                /<title[^>]*><!\[CDATA\[(.*?)\]\]><\/title>/,
-                /<title[^>]*>([\s\S]*?)<\/title>/
-              ]);
-              link = extractAtomLink(block);
-              time = pick(block, [
-                /<updated>([\s\S]*?)<\/updated>/,
-                /<published>([\s\S]*?)<\/published>/
-              ]);
+              if (mode === 'rss') {
+                title = pick(block, [
+                  /<title><!\[CDATA\[(.*?)\]\]><\/title>/,
+                  /<title>([\s\S]*?)<\/title>/
+                ]);
+                link = pick(block, [
+                  /<link>([\s\S]*?)<\/link>/
+                ]);
+                time = pick(block, [
+                  /<pubDate>([\s\S]*?)<\/pubDate>/,
+                  /<dc:date>([\s\S]*?)<\/dc:date>/
+                ]);
+              } else {
+                title = pick(block, [
+                  /<title[^>]*><!\[CDATA\[(.*?)\]\]><\/title>/,
+                  /<title[^>]*>([\s\S]*?)<\/title>/
+                ]);
+                link = extractAtomLink(block);
+                time = pick(block, [
+                  /<updated>([\s\S]*?)<\/updated>/,
+                  /<published>([\s\S]*?)<\/published>/
+                ]);
+              }
+
+              if (!title || !link) continue;
+
+              const id = crypto.createHash('md5').update(title + link).digest('hex');
+              if (sent.has(id)) continue;
+
+              const msg =
+                `RSS 🆕 更新\n${title}\n${link}` +
+                (time ? `\n${time}` : '');
+
+              const r = await postToFeishu(msg);
+              console.log('Feishu response:', r.status, r.body);
+
+              sent.add(id);
+              sentCount++;
             }
 
-            console.log(`Item#${i+1} parsed -> title? ${!!title} | link? ${!!link}`);
-
-            if (!title || !link) continue;
-
-            const id = crypto.createHash('md5').update(title + link).digest('hex');
-            if (sent.has(id)) continue;
-
-            const msg =
-              `RSS 🆕 更新\n${title}\n${link}` +
-              (time ? `\n${time}` : '');
-
-            const r = await postToFeishu(msg);
-            console.log('Feishu response:', r.status, r.body);
-
-            sent.add(id);
-            sentCount++;
-          }
-
-          fs.writeFileSync(sentFile, [...sent].join('\n'));
-          console.log('New items sent:', sentCount);
+            fs.writeFileSync(sentFile, [...sent].join('\n'));
+            console.log('New items sent:', sentCount);
+          })().catch(e => { console.error(e); process.exit(1); });
           EOF
+
+          node rss_to_feishu.cjs
+
 
       - name: Save sent state
         run: |
