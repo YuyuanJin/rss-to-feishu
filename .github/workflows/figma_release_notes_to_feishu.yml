@@ -1,4 +1,4 @@
-name: Figma Release Notes -> Feishu (Stable)
+name: Figma Release Notes -> Feishu (Card)
 
 on:
   workflow_dispatch:
@@ -34,7 +34,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install feedparser requests
 
-      - name: Fetch latest Figma release note and send to Feishu
+      - name: Fetch latest release note and send to Feishu
         env:
           SEND_FIRST_NOW: ${{ github.event.inputs.send_first_now }}
         run: |
@@ -67,45 +67,45 @@ jobs:
             "Pragma": "no-cache",
           }
 
-          print("RSS_URL:", RSS_URL)
+          # Fetch (requests auto-decompresses gzip)
           r = requests.get(RSS_URL, headers=headers, timeout=30, allow_redirects=True)
-          print("HTTP status:", r.status_code)
-          print("Final URL:", r.url)
           r.raise_for_status()
 
-          content = r.content  # bytes (more reliable than r.text)
-          # Print a short preview for debugging
+          content = r.content  # bytes
           preview = content[:2000].decode("utf-8", errors="replace")
-          print("---- Content preview (first ~2000 chars) ----")
-          print(preview)
-          print("---- End preview ----")
 
-          # If we got HTML instead of XML, stop with a clear message
+          # Guard: detect if secrets are swapped (calling Feishu instead of RSS)
+          if re.search(r'"msg"\s*:\s*"params error, msg_type need"', preview):
+            raise SystemExit("It looks like RSS_URL is pointing to Feishu webhook. Please swap RSS_URL and FEISHU_WEBHOOK secrets.")
+
+          # Guard: detect HTML bot-check/login page
           if re.search(r"<html|<!doctype html", preview, re.IGNORECASE):
-            raise SystemExit(
-              "Fetched HTML instead of Atom XML. This usually means the site returned a bot-check/login page from GitHub Actions."
-            )
+            raise SystemExit("Fetched HTML instead of Atom XML. The feed request may be blocked from GitHub Actions network.")
 
           feed = feedparser.parse(content)
-          print("feedparser.bozo:", getattr(feed, "bozo", None))
-          if getattr(feed, "bozo", 0):
-            print("bozo_exception:", getattr(feed, "bozo_exception", None))
 
           if not feed.entries:
             raise SystemExit("No entries found in feed after parsing bytes.")
 
-          entry = feed.entries[0]
+          entry = feed.entries[0]  # latest
           title = (entry.get("title") or "").strip()
           link = (entry.get("link") or "").strip()
           published = (entry.get("published") or entry.get("updated") or "").strip()
           entry_id = (entry.get("id") or "").strip()
 
-          print("first_title:", title)
-          print("first_link:", link)
-          print("first_published:", published)
+          # Summary: prefer summary, fallback to content
+          summary = (
+              entry.get("summary")
+              or (entry.get("content", [{}])[0].get("value") if entry.get("content") else "")
+              or ""
+          )
+
+          # Clean summary: strip HTML tags & compress whitespace
+          summary = re.sub(r"<[^>]+>", "", summary)
+          summary = re.sub(r"\s+", " ", summary).strip()
 
           if not title or not link:
-            raise SystemExit("Parsed entry missing title or link. Feed structure might be different than expected.")
+            raise SystemExit("Parsed entry missing title or link.")
 
           stable_id_src = entry_id or (title + "|" + link)
           stable_id = hashlib.md5(stable_id_src.encode("utf-8")).hexdigest()
@@ -113,27 +113,58 @@ jobs:
           already_sent = stable_id in sent
           should_send = send_first_now or (not already_sent)
 
-          print("stable_id:", stable_id)
-          print("already_sent:", already_sent)
+          print("RSS_URL:", RSS_URL)
           print("send_first_now:", send_first_now)
+          print("already_sent:", already_sent)
           print("should_send:", should_send)
+          print("title:", title)
+          print("link:", link)
 
           if not should_send:
             print("Nothing to send (already sent).")
             raise SystemExit(0)
 
-          text_lines = [
-            "🧩 Figma Release Notes (Latest)",
-            title,
-            link,
-          ]
-          if published:
-            text_lines.append(f"Published: {published}")
+          # Limit summary length for readability
+          if len(summary) > 320:
+            summary = summary[:320].rstrip() + "…"
+          if not summary:
+            summary = "_No summary available._"
 
-          payload = {
-            "msg_type": "text",
-            "content": {"text": "\n".join(text_lines)}
+          # Build Feishu interactive card
+          card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+              "title": {"tag": "plain_text", "content": "🚀 Figma Release Notes"},
+              "template": "blue"
+            },
+            "elements": [
+              {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"**{title}**"}
+              },
+              {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": summary}
+              },
+              {
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"🗓️ Published: `{published}`" if published else ""}
+              },
+              {
+                "tag": "action",
+                "actions": [
+                  {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "Open release note"},
+                    "type": "primary",
+                    "url": link
+                  }
+                ]
+              }
+            ]
           }
+
+          payload = {"msg_type": "interactive", "card": card}
 
           resp = requests.post(FEISHU_WEBHOOK, json=payload, timeout=15)
           print("Feishu HTTP status:", resp.status_code)
@@ -142,6 +173,7 @@ jobs:
           if resp.status_code != 200:
             raise SystemExit(f"Feishu webhook HTTP {resp.status_code}")
 
+          # Some bots return JSON like {"StatusCode":0,"StatusMessage":"success"}
           try:
             data = resp.json()
             if isinstance(data, dict) and ("StatusCode" in data) and data.get("StatusCode") != 0:
@@ -149,9 +181,15 @@ jobs:
           except ValueError:
             pass
 
+          # Save state
           sent.add(stable_id)
           with open(state_file, "w", encoding="utf-8") as f:
-            json.dump({"sent_ids": sorted(sent), "updated_at": datetime.datetime.utcnow().isoformat() + "Z"}, f, ensure_ascii=False, indent=2)
+            json.dump(
+              {"sent_ids": sorted(sent), "updated_at": datetime.datetime.utcnow().isoformat() + "Z"},
+              f,
+              ensure_ascii=False,
+              indent=2
+            )
 
           print("Sent OK, state updated.")
           PY
