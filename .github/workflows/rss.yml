@@ -1,0 +1,73 @@
+name: RSS to Feishu
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  rss:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch RSS
+        run: |
+          curl -s "${RSS_URL}" -o feed.xml
+
+      - name: Parse and Send to Feishu
+        run: |
+          node <<'EOF'
+          const fs = require('fs');
+          const crypto = require('crypto');
+          const https = require('https');
+          const xml = fs.readFileSync('feed.xml', 'utf8');
+
+          const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)];
+          if (!items.length) process.exit(0);
+
+          const sentFile = 'sent.txt';
+          const sent = fs.existsSync(sentFile)
+            ? new Set(fs.readFileSync(sentFile, 'utf8').split('\n'))
+            : new Set();
+
+          for (const m of items.slice(0, 3)) {
+            const block = m[1];
+            const title = (block.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/) || block.match(/<title>(.*?)<\/title>/))?.[1];
+            const link = (block.match(/<link>(.*?)<\/link>/))?.[1];
+            if (!title || !link) continue;
+
+            const id = crypto.createHash('md5').update(title + link).digest('hex');
+            if (sent.has(id)) continue;
+
+            const payload = JSON.stringify({
+              msg_type: "text",
+              content: { text: `🆕 RSS 更新\n${title}\n${link}` }
+            });
+
+            const req = https.request(process.env.FEISHU_WEBHOOK, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(payload)
+              }
+            });
+
+            req.write(payload);
+            req.end();
+
+            sent.add(id);
+          }
+
+          fs.writeFileSync(sentFile, [...sent].join('\n'));
+          EOF
+
+      - name: Save state
+        run: |
+          git config user.name "rss-bot"
+          git config user.email "rss-bot@github.com"
+          git add sent.txt || true
+          git commit -m "update sent items" || true
+          git push || true
