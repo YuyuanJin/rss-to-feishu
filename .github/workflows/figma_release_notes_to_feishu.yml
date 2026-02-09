@@ -36,7 +36,7 @@ jobs:
 
       - name: Fetch latest release note and send to Feishu
         env:
-          SEND_FIRST_NOW: ${{ github.event.inputs.send_first_now }}
+          SEND_FIRST_NOW: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.send_first_now || 'false' }}
         run: |
           python <<'PY'
           import os, json, hashlib, datetime, re
@@ -48,7 +48,7 @@ jobs:
             raise SystemExit("Missing FEISHU_WEBHOOK secret.")
 
           RSS_URL = (os.environ.get("RSS_URL") or "https://www.figma.com/release-notes/feed/atom.xml").strip()
-          send_first_now = (os.environ.get("SEND_FIRST_NOW") or "true").lower() == "true"
+          send_first_now = (os.environ.get("SEND_FIRST_NOW") or "false").lower() == "true"
 
           state_file = "sent_state.json"
           sent = set()
