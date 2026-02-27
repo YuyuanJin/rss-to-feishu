@@ -45,6 +45,7 @@ jobs:
           import feedparser
 
           FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "").strip()
+          FEISHU_WEBHOOK_2 = os.environ.get("FEISHU_WEBHOOK_2", "").strip()
           if not FEISHU_WEBHOOK:
             raise SystemExit("Missing FEISHU_WEBHOOK secret.")
 
@@ -180,21 +181,27 @@ jobs:
             "card": card
           }
           
-          resp = requests.post(FEISHU_WEBHOOK, json=payload, timeout=15)
-
-          print("Feishu HTTP status:", resp.status_code)
-          print("Feishu body:", resp.text)
-
-          if resp.status_code != 200:
-            raise SystemExit(f"Feishu webhook HTTP {resp.status_code}")
-
-          # Some bots return JSON like {"StatusCode":0,"StatusMessage":"success"}
-          try:
-            data = resp.json()
-            if isinstance(data, dict) and ("StatusCode" in data) and data.get("StatusCode") != 0:
-              raise SystemExit(f"Feishu rejected: {data}")
-          except ValueError:
-            pass
+          
+          
+          webhooks = [FEISHU_WEBHOOK, FEISHU_WEBHOOK_2]
+          webhooks = [w for w in webhooks if w]  # 去掉空值
+          
+          for idx, hook in enumerate(webhooks, start=1):
+              resp = requests.post(hook, json=payload, timeout=15)
+          
+              print(f"[Feishu #{idx}] HTTP status:", resp.status_code)
+              print(f"[Feishu #{idx}] body:", resp.text)
+          
+              if resp.status_code != 200:
+                  raise SystemExit(f"[Feishu #{idx}] webhook HTTP {resp.status_code}")
+          
+              try:
+                  data = resp.json()
+                  if isinstance(data, dict) and ("StatusCode" in data) and data.get("StatusCode") != 0:
+                      raise SystemExit(f"[Feishu #{idx}] rejected: {data}")
+              except ValueError:
+                  pass
+            
 
           # Save state
           sent.add(stable_id)
