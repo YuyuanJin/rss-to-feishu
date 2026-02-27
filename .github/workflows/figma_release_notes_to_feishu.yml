@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+      FEISHU_WEBHOOK_2: ${{ secrets.FEISHU_WEBHOOK_2 }}
       RSS_URL: ${{ secrets.RSS_URL }}
 
     steps:
