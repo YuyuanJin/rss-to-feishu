@@ -29,10 +29,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -205,15 +205,15 @@ jobs:
           # Build Feishu card
           # ----------------------------
           china_tz = timezone(timedelta(hours=8))
-          start_cn = window_start.astimezone(china_tz).strftime("%Y-%m-%d")
-          end_cn = window_end.astimezone(china_tz).strftime("%Y-%m-%d")
+          start_cn = window_start.astimezone(china_tz).strftime("%b %d")
+          end_cn = window_end.astimezone(china_tz).strftime("%b %d")
 
           elements = [
               {
                   "tag": "div",
                   "text": {
                       "tag": "lark_md",
-                      "content": f"**{len(weekly_updates)}** new Figma release note(s) from **{start_cn}** to **{end_cn}**."
+                      "content": f"{start_cn} – {end_cn}"
                   }
               },
               {
@@ -223,42 +223,41 @@ jobs:
 
           max_items_in_card = 8
 
-          for item in weekly_updates[:max_items_in_card]:
-              dt_cn = item["dt"].astimezone(china_tz).strftime("%m-%d")
-              summary = item["summary"] or "No summary available."
-              if len(summary) > 180:
-                  summary = summary[:180].rstrip() + "…"
+          for idx, item in enumerate(weekly_updates[:max_items_in_card]):
+            summary = item["summary"] or "No summary available."
 
-              elements.append({
-                  "tag": "div",
-                  "text": {
-                      "tag": "lark_md",
-                      "content": f"**{dt_cn} · [{item['title']}]({item['link']})**\n{summary}"
-                  }
-              })
+            elements.append({
+              "tag": "div",
+              "text": {
+                "tag": "lark_md",
+                "content": f"**[{item['title']}]({item['link']})**\n{summary}"
+              }
+            })
+
+             # add spacing between items, but not after the last visible one
+            if idx < min(len(weekly_updates), max_items_in_card) - 1:
+                elements.append({
+                    "tag": "div",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": ""
+                    }
+                })
 
           if len(weekly_updates) > max_items_in_card:
               elements.append({
                   "tag": "div",
                   "text": {
                       "tag": "lark_md",
-                      "content": f"_And {len(weekly_updates) - max_items_in_card} more update(s). See the full release notes below._"
-                  }
+                      "content": f"_And {len(weekly_updates) - max_items_in_card} more update(s)._"
               })
 
           elements.append({
-              "tag": "action",
-              "actions": [
-                  {
-                      "tag": "button",
-                      "text": {
-                          "tag": "plain_text",
-                          "content": "View all release notes"
-                      },
-                      "type": "primary",
-                      "url": "https://www.figma.com/release-notes/"
-                  }
-              ]
+              "tag": "div",
+              "text": {
+                  "tag": "lark_md",
+                  "content": "[View all release notes →](https://www.figma.com/release-notes/)"
+              }
           })
 
           card = {
@@ -268,7 +267,7 @@ jobs:
               "header": {
                   "title": {
                       "tag": "plain_text",
-                      "content": "🚀 Figma Weekly Release Digest"
+                      "content":  f"🚀 Figma Weekly Updates · {len(weekly_updates)} new"
                   },
                   "template": "blue"
               },
