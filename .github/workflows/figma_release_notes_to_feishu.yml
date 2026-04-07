@@ -208,19 +208,6 @@ jobs:
           start_cn = window_start.astimezone(china_tz).strftime("%b %d")
           end_cn = window_end.astimezone(china_tz).strftime("%b %d")
 
-          elements = [
-              {
-                  "tag": "div",
-                  "text": {
-                      "tag": "lark_md",
-                      "content": f"{start_cn} – {end_cn}"
-                  }
-              },
-              {
-                  "tag": "hr"
-              }
-          ]
-
           max_items_in_card = 8
 
           for idx, item in enumerate(weekly_updates[:max_items_in_card]):
@@ -230,7 +217,7 @@ jobs:
               "tag": "div",
               "text": {
                 "tag": "lark_md",
-                "content": f"**[{item['title']}]({item['link']})**\n{summary}"
+                "content": f"**{item['title']}**\n{summary}"
               }
             })
 
@@ -268,9 +255,13 @@ jobs:
               "header": {
                   "title": {
                       "tag": "plain_text",
-                      "content":  f"🚀 Figma Weekly Updates · {len(weekly_updates)} new"
+                      "content":  "🚀 Figma Weekly Updates"
                   },
-                  "template": "blue"
+                  "subtitle": {
+                      "tag": "plain_text",
+                      "content": f"{start_cn} – {end_cn} · {len(weekly_updates)} new"
+                  },
+                  "template": "indigo"
               },
               "elements": elements
           }
