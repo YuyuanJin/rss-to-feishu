@@ -1,14 +1,16 @@
-name: Figma Release Notes -> Feishu (Card)
+name: Figma Weekly Release Notes -> Feishu (Card)
 
 on:
   workflow_dispatch:
     inputs:
-      send_first_now:
-        description: "Manual run: always send the latest (first) release note"
+      send_digest_now:
+        description: "Manual run: send weekly digest now if there are new updates"
         required: false
         default: "true"
   schedule:
-    - cron: "*/30 * * * *"
+    # GitHub cron uses UTC
+    # Monday 10:00 in China = Monday 02:00 UTC
+    - cron: "0 2 * * 1"
 
 permissions:
   contents: write
@@ -33,187 +35,274 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install feedparser requests
+          pip install feedparser requests python-dateutil
 
-      - name: Fetch latest release note and send to Feishu
+      - name: Fetch weekly release notes and send digest to Feishu
         env:
-          SEND_FIRST_NOW: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.send_first_now || 'false' }}
+          SEND_DIGEST_NOW: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.send_digest_now || 'false' }}
         run: |
           python <<'PY'
-          import os, json, hashlib, datetime, re
+          import os, json, hashlib, datetime, re, time
           import requests
           import feedparser
+          from dateutil import parser as dateparser
+          from datetime import timezone, timedelta
 
           FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "").strip()
           FEISHU_WEBHOOK_2 = os.environ.get("FEISHU_WEBHOOK_2", "").strip()
           if not FEISHU_WEBHOOK:
-            raise SystemExit("Missing FEISHU_WEBHOOK secret.")
+              raise SystemExit("Missing FEISHU_WEBHOOK secret.")
 
           RSS_URL = (os.environ.get("RSS_URL") or "https://www.figma.com/release-notes/feed/atom.xml").strip()
-          send_first_now = (os.environ.get("SEND_FIRST_NOW") or "false").lower() == "true"
+          send_digest_now = (os.environ.get("SEND_DIGEST_NOW") or "false").lower() == "true"
 
           state_file = "sent_state.json"
-          sent = set()
-          if os.path.exists(state_file):
-            try:
-              with open(state_file, "r", encoding="utf-8") as f:
-                sent = set(json.load(f).get("sent_ids", []))
-            except Exception:
-              sent = set()
 
-          headers = {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-            "Accept": "application/atom+xml,application/xml;q=0.9,text/xml;q=0.8,*/*;q=0.7",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
+          # ----------------------------
+          # Load state
+          # ----------------------------
+          state = {
+              "sent_ids": [],
+              "last_digest_at": None,
+              "updated_at": None,
           }
 
-          # Fetch (requests auto-decompresses gzip)
+          if os.path.exists(state_file):
+              try:
+                  with open(state_file, "r", encoding="utf-8") as f:
+                      loaded = json.load(f)
+                      if isinstance(loaded, dict):
+                          state.update(loaded)
+              except Exception:
+                  pass
+
+          sent_ids = set(state.get("sent_ids", []))
+
+          now_utc = datetime.datetime.now(timezone.utc)
+          last_digest_at_raw = state.get("last_digest_at")
+
+          if last_digest_at_raw:
+              try:
+                  window_start = dateparser.isoparse(last_digest_at_raw).astimezone(timezone.utc)
+              except Exception:
+                  window_start = now_utc - timedelta(days=7)
+          else:
+              # first run fallback
+              window_start = now_utc - timedelta(days=7)
+
+          window_end = now_utc
+
+          print("RSS_URL:", RSS_URL)
+          print("send_digest_now:", send_digest_now)
+          print("window_start:", window_start.isoformat())
+          print("window_end:", window_end.isoformat())
+
+          headers = {
+              "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+              "Accept": "application/atom+xml,application/xml;q=0.9,text/xml;q=0.8,*/*;q=0.7",
+              "Accept-Language": "en-US,en;q=0.9",
+              "Cache-Control": "no-cache",
+              "Pragma": "no-cache",
+          }
+
+          # Fetch feed
           r = requests.get(RSS_URL, headers=headers, timeout=30, allow_redirects=True)
           r.raise_for_status()
 
-          content = r.content  # bytes
+          content = r.content
           preview = content[:2000].decode("utf-8", errors="replace")
 
-          # Guard: detect if secrets are swapped (calling Feishu instead of RSS)
+          # Guard: detect swapped secrets
           if re.search(r'"msg"\s*:\s*"params error, msg_type need"', preview):
-            raise SystemExit("It looks like RSS_URL is pointing to Feishu webhook. Please swap RSS_URL and FEISHU_WEBHOOK secrets.")
+              raise SystemExit("It looks like RSS_URL is pointing to a Feishu webhook. Please swap RSS_URL and FEISHU_WEBHOOK secrets.")
 
-          # Guard: detect HTML bot-check/login page
+          # Guard: detect HTML page instead of feed
           if re.search(r"<html|<!doctype html", preview, re.IGNORECASE):
-            raise SystemExit("Fetched HTML instead of Atom XML. The feed request may be blocked from GitHub Actions network.")
+              raise SystemExit("Fetched HTML instead of Atom XML. The feed request may be blocked from GitHub Actions network.")
 
           feed = feedparser.parse(content)
 
           if not feed.entries:
-            raise SystemExit("No entries found in feed after parsing bytes.")
+              raise SystemExit("No entries found in feed after parsing bytes.")
 
-          entry = feed.entries[0]  # latest
-          title = (entry.get("title") or "").strip()
-          link = (entry.get("link") or "").strip()
-          published = (entry.get("published") or entry.get("updated") or "").strip()
-          entry_id = (entry.get("id") or "").strip()
+          def clean_text(text: str) -> str:
+              text = re.sub(r"<[^>]+>", "", text or "")
+              text = re.sub(r"\s+", " ", text).strip()
+              return text
 
-          # Summary: prefer summary, fallback to content
-          summary = (
-              entry.get("summary")
-              or (entry.get("content", [{}])[0].get("value") if entry.get("content") else "")
-              or ""
-          )
+          def get_entry_datetime(entry):
+              if getattr(entry, "published_parsed", None):
+                  return datetime.datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
+              if getattr(entry, "updated_parsed", None):
+                  return datetime.datetime.fromtimestamp(time.mktime(entry.updated_parsed), tz=timezone.utc)
 
-          # Clean summary: strip HTML tags & compress whitespace
-          summary = re.sub(r"<[^>]+>", "", summary)
-          summary = re.sub(r"\s+", " ", summary).strip()
+              raw = (entry.get("published") or entry.get("updated") or "").strip()
+              if raw:
+                  try:
+                      return dateparser.isoparse(raw).astimezone(timezone.utc)
+                  except Exception:
+                      return None
+              return None
 
-          if not title or not link:
-            raise SystemExit("Parsed entry missing title or link.")
+          weekly_updates = []
 
-          stable_id_src = entry_id or (title + "|" + link)
-          stable_id = hashlib.md5(stable_id_src.encode("utf-8")).hexdigest()
+          for entry in feed.entries:
+              title = (entry.get("title") or "").strip()
+              link = (entry.get("link") or "").strip()
+              entry_id = (entry.get("id") or "").strip()
 
-          already_sent = stable_id in sent
-          should_send = send_first_now or (not already_sent)
+              summary = (
+                  entry.get("summary")
+                  or (entry.get("content", [{}])[0].get("value") if entry.get("content") else "")
+                  or ""
+              )
+              summary = clean_text(summary)
 
-          print("RSS_URL:", RSS_URL)
-          print("send_first_now:", send_first_now)
-          print("already_sent:", already_sent)
-          print("should_send:", should_send)
-          print("title:", title)
-          print("link:", link)
+              if not title or not link:
+                  continue
 
-          if not should_send:
-            print("Nothing to send (already sent).")
-            raise SystemExit(0)
+              dt = get_entry_datetime(entry)
+              if not dt:
+                  continue
 
-          # Limit summary length for readability
-          if len(summary) > 320:
-            summary = summary[:320].rstrip() + "…"
-          if not summary:
-            summary = "_No summary available._"
+              stable_id_src = entry_id or (title + "|" + link)
+              stable_id = hashlib.md5(stable_id_src.encode("utf-8")).hexdigest()
 
-          # --- Clean Feishu interactive card (no date) ---
-          card = {
-            "config": {
-              "wide_screen_mode": True
-            },
-            "header": {
-              "title": {
-                "tag": "plain_text",
-                "content": "🚀 Figma Release Notes"
-              },
-              "template": "blue"
-            },
-            "elements": [
+              # include only new items within this digest window
+              if not (window_start < dt <= window_end):
+                  continue
+              if stable_id in sent_ids:
+                  continue
+
+              weekly_updates.append({
+                  "id": stable_id,
+                  "title": title,
+                  "link": link,
+                  "summary": summary,
+                  "dt": dt,
+              })
+
+          # oldest -> newest reads better in a digest
+          weekly_updates.sort(key=lambda x: x["dt"])
+
+          print("weekly_updates_count:", len(weekly_updates))
+
+          if not weekly_updates:
+              print("No new updates in this weekly window. Nothing to send.")
+              raise SystemExit(0)
+
+          # ----------------------------
+          # Build Feishu card
+          # ----------------------------
+          china_tz = timezone(timedelta(hours=8))
+          start_cn = window_start.astimezone(china_tz).strftime("%Y-%m-%d")
+          end_cn = window_end.astimezone(china_tz).strftime("%Y-%m-%d")
+
+          elements = [
               {
-                "tag": "div",
-                "text": {
-                  "tag": "lark_md",
-                  "content": f"**{title}**"
-                }
-              },
-              {
-                "tag": "div",
-                "text": {
-                  "tag": "lark_md",
-                  "content": summary
-                }
-              },
-              {
-                "tag": "action",
-                "actions": [
-                  {
-                    "tag": "button",
-                    "text": {
-                      "tag": "plain_text",
-                      "content": "Learn more"
-                    },
-                    "type": "primary",
-                    "url": link
+                  "tag": "div",
+                  "text": {
+                      "tag": "lark_md",
+                      "content": f"**{len(weekly_updates)}** new Figma release note(s) from **{start_cn}** to **{end_cn}**."
                   }
-                ]
+              },
+              {
+                  "tag": "hr"
               }
-            ]
+          ]
+
+          max_items_in_card = 8
+
+          for item in weekly_updates[:max_items_in_card]:
+              dt_cn = item["dt"].astimezone(china_tz).strftime("%m-%d")
+              summary = item["summary"] or "No summary available."
+              if len(summary) > 180:
+                  summary = summary[:180].rstrip() + "…"
+
+              elements.append({
+                  "tag": "div",
+                  "text": {
+                      "tag": "lark_md",
+                      "content": f"**{dt_cn} · [{item['title']}]({item['link']})**\n{summary}"
+                  }
+              })
+
+          if len(weekly_updates) > max_items_in_card:
+              elements.append({
+                  "tag": "div",
+                  "text": {
+                      "tag": "lark_md",
+                      "content": f"_And {len(weekly_updates) - max_items_in_card} more update(s). See the full release notes below._"
+                  }
+              })
+
+          elements.append({
+              "tag": "action",
+              "actions": [
+                  {
+                      "tag": "button",
+                      "text": {
+                          "tag": "plain_text",
+                          "content": "View all release notes"
+                      },
+                      "type": "primary",
+                      "url": "https://www.figma.com/release-notes/"
+                  }
+              ]
+          })
+
+          card = {
+              "config": {
+                  "wide_screen_mode": True
+              },
+              "header": {
+                  "title": {
+                      "tag": "plain_text",
+                      "content": "🚀 Figma Weekly Release Digest"
+                  },
+                  "template": "blue"
+              },
+              "elements": elements
           }
-          
+
           payload = {
-            "msg_type": "interactive",
-            "card": card
+              "msg_type": "interactive",
+              "card": card
           }
-          
-          
-          
+
           webhooks = [FEISHU_WEBHOOK, FEISHU_WEBHOOK_2]
-          webhooks = [w for w in webhooks if w]  # 去掉空值
-          
+          webhooks = [w for w in webhooks if w]
+
           for idx, hook in enumerate(webhooks, start=1):
               resp = requests.post(hook, json=payload, timeout=15)
-          
+
               print(f"[Feishu #{idx}] HTTP status:", resp.status_code)
               print(f"[Feishu #{idx}] body:", resp.text)
-          
+
               if resp.status_code != 200:
                   raise SystemExit(f"[Feishu #{idx}] webhook HTTP {resp.status_code}")
-          
+
               try:
                   data = resp.json()
                   if isinstance(data, dict) and ("StatusCode" in data) and data.get("StatusCode") != 0:
                       raise SystemExit(f"[Feishu #{idx}] rejected: {data}")
               except ValueError:
                   pass
-            
 
-          # Save state
-          sent.add(stable_id)
+          # ----------------------------
+          # Save state only after success
+          # ----------------------------
+          for item in weekly_updates:
+              sent_ids.add(item["id"])
+
+          state["sent_ids"] = sorted(sent_ids)
+          state["last_digest_at"] = now_utc.isoformat()
+          state["updated_at"] = now_utc.isoformat()
+
           with open(state_file, "w", encoding="utf-8") as f:
-            json.dump(
-              {"sent_ids": sorted(sent), "updated_at": datetime.datetime.utcnow().isoformat() + "Z"},
-              f,
-              ensure_ascii=False,
-              indent=2
-            )
+              json.dump(state, f, ensure_ascii=False, indent=2)
 
-          print("Sent OK, state updated.")
+          print("Weekly digest sent OK, state updated.")
           PY
 
       - name: Commit state
@@ -221,5 +310,5 @@ jobs:
           git config user.name "rss-bot"
           git config user.email "rss-bot@github.com"
           git add sent_state.json || true
-          git commit -m "Update sent state" || true
+          git commit -m "Update weekly digest state" || true
           git push || true
