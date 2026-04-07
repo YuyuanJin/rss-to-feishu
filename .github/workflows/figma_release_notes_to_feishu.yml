@@ -7,7 +7,7 @@ on:
         description: "Manual run: send weekly digest now if there are new updates"
         required: false
         default: "true"
-    force_test_digest:
+      force_test_digest:
         description: "Manual test: send a digest for the last 7 days, ignoring sent state"
         required: false
         default: "false"
@@ -85,7 +85,7 @@ jobs:
           sent_ids = set(state.get("sent_ids", []))
 
           now_utc = datetime.datetime.now(timezone.utc)
-          
+        
           last_digest_at_raw = state.get("last_digest_at")
 
           if force_test_digest:
