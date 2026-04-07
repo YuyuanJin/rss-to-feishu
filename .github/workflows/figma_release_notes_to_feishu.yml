@@ -250,6 +250,7 @@ jobs:
                   "text": {
                       "tag": "lark_md",
                       "content": f"_And {len(weekly_updates) - max_items_in_card} more update(s)._"
+                  }
               })
 
           elements.append({
