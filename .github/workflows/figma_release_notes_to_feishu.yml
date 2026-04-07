@@ -208,6 +208,8 @@ jobs:
           start_cn = window_start.astimezone(china_tz).strftime("%b %d")
           end_cn = window_end.astimezone(china_tz).strftime("%b %d")
 
+          elements = [] 
+
           max_items_in_card = 8
 
           for idx, item in enumerate(weekly_updates[:max_items_in_card]):
