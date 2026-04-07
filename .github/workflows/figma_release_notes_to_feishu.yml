@@ -257,7 +257,7 @@ jobs:
               "header": {
                   "title": {
                       "tag": "plain_text",
-                      "content":  "🚀 Figma Weekly Updates"
+                      "content":  "Figma Weekly Updates"
                   },
                   "subtitle": {
                       "tag": "plain_text",
