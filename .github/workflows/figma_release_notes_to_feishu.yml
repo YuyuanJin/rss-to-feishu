@@ -7,6 +7,10 @@ on:
         description: "Manual run: send weekly digest now if there are new updates"
         required: false
         default: "true"
+    force_test_digest:
+        description: "Manual test: send a digest for the last 7 days, ignoring sent state"
+        required: false
+        default: "false"
   schedule:
     # GitHub cron uses UTC
     # Monday 10:00 in China = Monday 02:00 UTC
@@ -40,6 +44,7 @@ jobs:
       - name: Fetch weekly release notes and send digest to Feishu
         env:
           SEND_DIGEST_NOW: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.send_digest_now || 'false' }}
+          FORCE_TEST_DIGEST: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_test_digest || 'false' }}
         run: |
           python <<'PY'
           import os, json, hashlib, datetime, re, time
@@ -55,6 +60,7 @@ jobs:
 
           RSS_URL = (os.environ.get("RSS_URL") or "https://www.figma.com/release-notes/feed/atom.xml").strip()
           send_digest_now = (os.environ.get("SEND_DIGEST_NOW") or "false").lower() == "true"
+          force_test_digest = (os.environ.get("FORCE_TEST_DIGEST") or "false").lower() == "true"
 
           state_file = "sent_state.json"
 
@@ -79,17 +85,21 @@ jobs:
           sent_ids = set(state.get("sent_ids", []))
 
           now_utc = datetime.datetime.now(timezone.utc)
+          
           last_digest_at_raw = state.get("last_digest_at")
 
-          if last_digest_at_raw:
-              try:
-                  window_start = dateparser.isoparse(last_digest_at_raw).astimezone(timezone.utc)
-              except Exception:
-                  window_start = now_utc - timedelta(days=7)
+          if force_test_digest:
+            window_start = now_utc - timedelta(days=7)
           else:
+            if last_digest_at_raw:
+              try:
+                window_start = dateparser.isoparse(last_digest_at_raw).astimezone(timezone.utc)
+              except Exception:
+                window_start = now_utc - timedelta(days=7)
+            else:
               # first run fallback
               window_start = now_utc - timedelta(days=7)
-
+          
           window_end = now_utc
 
           print("RSS_URL:", RSS_URL)
@@ -171,7 +181,7 @@ jobs:
               # include only new items within this digest window
               if not (window_start < dt <= window_end):
                   continue
-              if stable_id in sent_ids:
+              if (not force_test_digest) and stable_id in sent_ids:
                   continue
 
               weekly_updates.append({
@@ -291,18 +301,22 @@ jobs:
 
           # ----------------------------
           # Save state only after success
+          # Skip state update in manual test mode
           # ----------------------------
-          for item in weekly_updates:
+          if force_test_digest:
+            print("Test digest sent OK. State not updated.")
+          else:
+            for item in weekly_updates:
               sent_ids.add(item["id"])
 
-          state["sent_ids"] = sorted(sent_ids)
-          state["last_digest_at"] = now_utc.isoformat()
-          state["updated_at"] = now_utc.isoformat()
+            state["sent_ids"] = sorted(sent_ids)
+            state["last_digest_at"] = now_utc.isoformat()
+            state["updated_at"] = now_utc.isoformat()
 
-          with open(state_file, "w", encoding="utf-8") as f:
+            with open(state_file, "w", encoding="utf-8") as f:
               json.dump(state, f, ensure_ascii=False, indent=2)
 
-          print("Weekly digest sent OK, state updated.")
+            print("Weekly digest sent OK, state updated.")
           PY
 
       - name: Commit state
