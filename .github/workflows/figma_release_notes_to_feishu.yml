@@ -13,8 +13,8 @@ on:
         default: "false"
   schedule:
     # GitHub cron uses UTC
-    # Monday 10:00 in China = Monday 02:00 UTC
-    - cron: "0 2 * * 1"
+    # Monday 10:17 in China = Monday 02:17 UTC
+    - cron: "17 2 * * 1"
 
 permissions:
   contents: write
